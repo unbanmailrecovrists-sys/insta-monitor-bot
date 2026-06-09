@@ -1,23 +1,16 @@
 import os
-import threading
-import time
+import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 import instaloader
 
-# --- FLASK WEB SERVER FOR RENDER FREE PLAN ---
-# Render ki Web Service ko active rakhne ke liye dummy server
+# --- FLASK WEB SERVER ---
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
 def home():
     return "Bot is running 24/7!", 200
-
-def run_flask():
-    # Render automatically PORT environment variable deta hai, default 10000 use karenge
-    port = int(os.environ.get("PORT", 10000))
-    app_flask.run(host="0.0.0.0", port=port)
 
 # --- CONFIGURATION ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "AAPKA_TELEGRAM_BOT_TOKEN")
@@ -103,14 +96,17 @@ async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"⚠️ Error checking `@{username}`: {e}")
 
-# --- BACKGROUND MONITORING LOOP ---
-def background_monitor(app):
+# --- ASYNC BACKGROUND MONITORING LOOP ---
+async def background_monitor(app):
     print("Background Monitoring Loop Started...")
     while True:
         if monitored_accounts:
             for username in list(monitored_accounts):
                 try:
-                    profile = instaloader.Profile.from_username(L.context, username)
+                    # Async function ke andar loop ko block hone se bachane ke liye run_in_executor use karenge
+                    loop = asyncio.get_event_loop()
+                    profile = await loop.run_in_executor(None, instaloader.Profile.from_username, L.context, username)
+                    
                     if not status_tracker.get(username):
                         screenshot_img = get_screenshot_url(username)
                         msg = (
@@ -122,17 +118,17 @@ def background_monitor(app):
                             f"▪️ *Followers:* {profile.followers}\n"
                             f"▪️ *Following:* {profile.followees}"
                         )
-                        app.bot.send_photo(chat_id=CHAT_ID, photo=screenshot_img, caption=msg, parse_mode="Markdown")
+                        await app.bot.send_photo(chat_id=CHAT_ID, photo=screenshot_img, caption=msg, parse_mode="Markdown")
                         status_tracker[username] = True
                 except instaloader.exceptions.ProfileNotExistsException:
                     if status_tracker.get(username):
                         status_tracker[username] = False
                 except Exception as e:
                     print(f"Loop error for {username}: {e}")
-        time.sleep(60)
+        await asyncio.sleep(60)  # Non-blocking sleep
 
-# --- MAIN FUNCTION ---
-def main():
+# --- MAIN ASYNC FUNCTION ---
+async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("add", add_account))
@@ -140,18 +136,27 @@ def main():
     app.add_handler(CommandHandler("list", list_accounts))
     app.add_handler(CommandHandler("status", check_status))
 
-    # 1. Background Bot Thread chalu karein
-    monitor_thread = threading.Thread(target=background_monitor, args=(app,))
-    monitor_thread.daemon = True
-    monitor_thread.start()
-
-    # 2. Flask Web Server ko alag thread me chalu karein Render ke liye
-    flask_thread = threading.Thread(target=run_flask)
+    # Flask ko bina thread block kiye background me start karne ke liye hypercorn/werkzeug setup ki jagah standard threading background me daalenge jo event loop se alag ho
+    import threading
+    port = int(os.environ.get("PORT", 10000))
+    flask_thread = threading.Thread(target=lambda: app_flask.run(host="0.0.0.0", port=port, use_reloader=False))
     flask_thread.daemon = True
     flask_thread.start()
 
-    print("Telegram Bot & Flask Server are running...")
-    app.run_polling()
+    # Bot initialized aur background task register ho raha hai
+    await app.initialize()
+    await app.start()
+    
+    # Background monitor task ko loop me chalu karna
+    asyncio.create_task(background_monitor(app))
+    
+    print("Telegram Bot & Flask Server are running perfectly...")
+    await app.updater.start_polling()
+    
+    # Bot ko continuously chalte rehne dene ke liye sleep loop
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    main()
+    # Naye python versions ke liye clean asyncio run
+    asyncio.run(main())
