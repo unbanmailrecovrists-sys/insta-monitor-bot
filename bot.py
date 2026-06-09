@@ -17,12 +17,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "AAPKA_TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID", "AAPKI_CHAT_ID")
 SEARCHAPI_KEY = os.environ.get("SEARCHAPI_KEY", "AAPKI_SEARCHAPI_KEY")
 
-monitored_accounts = []  # Accounts track karne ki list
-status_tracker = {}     # Unka online/banned status track karne ke liye
+monitored_accounts = []  
+status_tracker = {}     
 
 # --- SEARCHAPI HELPER FUNCTION ---
 def fetch_instagram_data(username):
-    """SearchApi Documentation ke mutabik direct data nikalna"""
+    """SearchApi se raw data nikalna aur structure check karna"""
     url = "https://www.searchapi.io/api/v1/search"
     params = {
         "engine": "instagram_profile",
@@ -31,29 +31,32 @@ def fetch_instagram_data(username):
     }
     try:
         response = requests.get(url, params=params, timeout=15)
+        print(f"[LOG] SearchApi Status for {username}: {response.status_code}")
         
-        # Status code 200 hai matlab account active/unban hai
         if response.status_code == 200:
             data = response.json()
-            if "profile" in data:
+            # Debugging ke liye logs me pura response print hoga
+            print(f"[LOG] Response Data: {data}")
+            
+            # Agar direct 'profile' key milti hai
+            if "profile" in data and data["profile"]:
                 profile_data = data["profile"]
                 return {
                     "active": True,
-                    "name": profile_data.get("name", username),
-                    "posts": profile_data.get("posts", 0),
-                    "followers": profile_data.get("followers", 0),
-                    "following": profile_data.get("following", 0),
-                    "pfp": profile_data.get("profile_pic", ""),
-                    "bio": profile_data.get("bio", "No Bio")
+                    "name": profile_data.get("name") or profile_data.get("full_name") or username,
+                    "posts": profile_data.get("posts") or profile_data.get("posts_count") or 0,
+                    "followers": profile_data.get("followers") or profile_data.get("followers_count") or 0,
+                    "following": profile_data.get("following") or profile_data.get("following_count") or 0,
+                    "pfp": profile_data.get("profile_pic") or profile_data.get("profile_pic_url") or "",
+                    "bio": profile_data.get("bio") or profile_data.get("biography") or "No Bio"
                 }
-        # Agar 404 ya koi error hai matlab account banned hai
         return {"active": False}
-    except:
+    except Exception as e:
+        print(f"[ERROR] Fetch failed: {e}")
         return {"active": False}
 
 # --- TELEGRAM COMMAND HANDLERS ---
 
-# 1. /add username
 async def add_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Please provide a username. Example: `/add zuck`", parse_mode="Markdown")
@@ -66,7 +69,6 @@ async def add_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status_tracker[username] = False  
         await update.message.reply_text(f"✅ `@{username}` ko monitoring list me add kar diya gaya hai!")
 
-# 2. /remove username
 async def remove_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Please provide a username. Example: `/remove zuck`", parse_mode="Markdown")
@@ -80,7 +82,6 @@ async def remove_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"⚠️ `@{username}` list me nahi hai.")
 
-# 3. /list
 async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not monitored_accounts:
         await update.message.reply_text("📭 Monitoring list abhi khaali hai. Use `/add <username>`")
@@ -91,12 +92,38 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{i}. `@{user}` — {status}\n"
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-# 4. /status (Live data aur real-time card details)
+# NAYI COMMAND: /check username (Instant single profile check karne ke liye)
+async def check_single_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Username bhejye bhai. Example: `/check zuck`")
+        return
+    
+    username = context.args[0].lower().replace("@", "")
+    await update.message.reply_text(f"🔄 `@ {username}` ka live data fetch ho raha hai...")
+    
+    loop = asyncio.get_event_loop()
+    user_data = await loop.run_in_executor(None, fetch_instagram_data, username)
+    
+    if user_data["active"]:
+        msg = (
+            f"🟢 *@{username} is ACTIVE!*\n\n"
+            f"👤 *Name:* {user_data['name']}\n"
+            f"📝 *Bio:* {user_data['bio']}\n"
+            f"📊 *Posts:* {user_data['posts']} | *Followers:* {user_data['followers']} | *Following:* {user_data['following']}\n\n"
+            f"🔗 [Profile Link](https://instagram.com/{username})"
+        )
+        if user_data["pfp"]:
+            await update.message.reply_photo(photo=user_data["pfp"], caption=msg, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"🔴 `@{username}` Banned hai ya SearchApi key configuration check karein.")
+
 async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not monitored_accounts:
         await update.message.reply_text("📭 Pehle koi account add karein bhai! Use `/add <username>`")
         return
-    await update.message.reply_text("🔄 Live status aur profile data fetch ho raha hai...")
+    await update.message.reply_text("🔄 Sabhi accounts ka status check ho raha hai...")
     
     for username in monitored_accounts:
         loop = asyncio.get_event_loop()
@@ -107,17 +134,9 @@ async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = (
                 f"🟢 *@{username} is ACTIVE!*\n\n"
                 f"👤 *Name:* {user_data['name']}\n"
-                f"📝 *Bio:* {user_data['bio']}\n"
-                f"📊 *Posts:* {user_data['posts']} | *Followers:* {user_data['followers']} | *Following:* {user_data['following']}\n\n"
-                f"🔗 [Profile Link](https://instagram.com/{username})"
+                f"📊 *Posts:* {user_data['posts']} | *Followers:* {user_data['followers']}\n"
             )
-            try:
-                if user_data["pfp"]:
-                    await update.message.reply_photo(photo=user_data["pfp"], caption=msg, parse_mode="Markdown")
-                else:
-                    await update.message.reply_text(msg, parse_mode="Markdown")
-            except:
-                await update.message.reply_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(msg, parse_mode="Markdown")
         else:
             status_tracker[username] = False
             await update.message.reply_text(f"🔴 `@{username}` abhi bhi Banned ya Inactive hai.")
@@ -131,33 +150,22 @@ async def background_monitor(app):
                 loop = asyncio.get_event_loop()
                 user_data = await loop.run_in_executor(None, fetch_instagram_data, username)
                 
-                # Unban Hone Par Alert Bhejna (Pehle False tha, ab Active mila)
                 if user_data["active"] and not status_tracker.get(username):
                     msg = (
                         f"✅ *ALERT: Username unbanned!*\n\n"
-                        f"@{username} ab active ho gaya hai!\n\n"
-                        f"👤 *Name:* {user_data['name']}\n"
-                        f"📊 *Stats:*\n"
-                        f"▪️ *Posts:* {user_data['posts']}\n"
-                        f"▪️ *Followers:* {user_data['followers']}\n"
-                        f"▪️ *Following:* {user_data['following']}\n\n"
+                        f"@{username} ab active ho gaya hai!\n"
                         f"🔗 [View Profile](https://instagram.com/{username})"
                     )
                     try:
-                        if user_data["pfp"]:
-                            await app.bot.send_photo(chat_id=CHAT_ID, photo=user_data["pfp"], caption=msg, parse_mode="Markdown")
-                        else:
-                            await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-                    except:
                         await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+                    except Exception as e:
+                        print(f"Alert send failed: {e}")
                     status_tracker[username] = True
-                
                 elif not user_data["active"] and status_tracker.get(username):
                     status_tracker[username] = False
                     
-        await asyncio.sleep(60)  # Har 1 minute me automatically check karega
+        await asyncio.sleep(60)
 
-# --- MAIN ASYNC FUNCTION ---
 async def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -165,6 +173,7 @@ async def main():
     app.add_handler(CommandHandler("remove", remove_account))
     app.add_handler(CommandHandler("list", list_accounts))
     app.add_handler(CommandHandler("status", check_status))
+    app.add_handler(CommandHandler("check", check_single_account)) # /check register ho gayi
 
     import threading
     port = int(os.environ.get("PORT", 10000))
@@ -174,12 +183,10 @@ async def main():
 
     await app.initialize()
     await app.start()
-    
     asyncio.create_task(background_monitor(app))
     
-    print("Telegram Bot & Flask Server are running perfectly via SearchApi...")
+    print("Telegram Bot Running Perfectly...")
     await app.updater.start_polling()
-    
     while True:
         await asyncio.sleep(3600)
 
