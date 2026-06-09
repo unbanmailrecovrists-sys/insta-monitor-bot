@@ -2,26 +2,27 @@ import os
 import asyncio
 import requests
 from flask import Flask
-import discord
-from discord.ext import commands
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
+# --- FLASK WEB SERVER FOR RENDER ---
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
 def home():
-    return "Discord Bot is running 24/7!", 200
+    return "Telegram Bot is running 24/7!", 200
 
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "AAPKA_DISCORD_BOT_TOKEN")
+# --- CONFIGURATION ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "AAPKA_TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID", "AAPKI_CHAT_ID")
 SEARCHAPI_KEY = os.environ.get("SEARCHAPI_KEY", "AAPKI_SEARCHAPI_KEY")
 
-intents = discord.Intents.default()
-intents.message_content = True  
-bot = commands.Bot(command_prefix="!", intents=intents)
+monitored_accounts = []  # Accounts track karne ki list
+status_tracker = {}     # Unka online/banned status track karne ke liye
 
-monitored_accounts = {}  
-status_tracker = {}     
-
+# --- SEARCHAPI HELPER FUNCTION ---
 def fetch_instagram_data(username):
+    """SearchApi Documentation ke mutabik direct data nikalna"""
     url = "https://www.searchapi.io/api/v1/search"
     params = {
         "engine": "instagram_profile",
@@ -30,6 +31,8 @@ def fetch_instagram_data(username):
     }
     try:
         response = requests.get(url, params=params, timeout=15)
+        
+        # Status code 200 hai matlab account active/unban hai
         if response.status_code == 200:
             data = response.json()
             if "profile" in data:
@@ -43,80 +46,142 @@ def fetch_instagram_data(username):
                     "pfp": profile_data.get("profile_pic", ""),
                     "bio": profile_data.get("bio", "No Bio")
                 }
+        # Agar 404 ya koi error hai matlab account banned hai
         return {"active": False}
     except:
         return {"active": False}
 
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user.name} with Official SearchApi Spec ✅")
-    bot.loop.create_task(background_monitor())
+# --- TELEGRAM COMMAND HANDLERS ---
 
-@bot.command(name="monitor")
-async def monitor_account(ctx, username: str):
-    username = username.lower().replace("@", "")
-    if username in monitored_accounts:
-        await ctx.send(f"⚠️ `@{username}` pehle se list mein hai.")
+# 1. /add username
+async def add_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Please provide a username. Example: `/add zuck`", parse_mode="Markdown")
         return
-    monitored_accounts[username] = [ctx.channel.id, ctx.author.mention]
-    status_tracker[username] = False
-    await ctx.send(f"🟢 **Started monitoring `@{username}`**\nOnce it's unbanned, I'll send a premium card alert here!")
-
-@bot.command(name="check")
-async def check_account(ctx, username: str):
-    username = username.lower().replace("@", "")
-    await ctx.send("🔄 SearchApi se live profile data aur card fetch ho raha hai...")
-    
-    loop = asyncio.get_event_loop()
-    user_data = await loop.run_in_executor(None, fetch_instagram_data, username)
-    
-    if user_data["active"]:
-        status_tracker[username] = True
-        embed = discord.Embed(title="Khof Monitor BOT", color=discord.Color.green())
-        embed.add_field(name="Instagram Account", value=f"@{username}", inline=False)
-        embed.add_field(name="Name", value=user_data["name"], inline=True)
-        embed.add_field(name="Posts", value=str(user_data["posts"]), inline=True)
-        embed.add_field(name="Followers", value=str(user_data["followers"]), inline=True)
-        embed.add_field(name="Following", value=str(user_data["following"]), inline=True)
-        embed.add_field(name="Status", value="✅ Account is Active", inline=False)
-        if user_data["pfp"]:
-            embed.set_thumbnail(url=user_data["pfp"])
-        await ctx.send(embed=embed)
+    username = context.args[0].lower().replace("@", "")
+    if username in monitored_accounts:
+        await update.message.reply_text(f"⚠️ `@{username}` pehle se list me hai.")
     else:
-        await ctx.send(f"❌ Account `@{username}` abhi bhi Banned ya Inactive hai.")
+        monitored_accounts.append(username)
+        status_tracker[username] = False  
+        await update.message.reply_text(f"✅ `@{username}` ko monitoring list me add kar diya gaya hai!")
 
-async def background_monitor():
+# 2. /remove username
+async def remove_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("❌ Please provide a username. Example: `/remove zuck`", parse_mode="Markdown")
+        return
+    username = context.args[0].lower().replace("@", "")
+    if username in monitored_accounts:
+        monitored_accounts.remove(username)
+        if username in status_tracker:
+            del status_tracker[username]
+        await update.message.reply_text(f"❌ `@{username}` ko list se hata diya gaya hai.")
+    else:
+        await update.message.reply_text(f"⚠️ `@{username}` list me nahi hai.")
+
+# 3. /list
+async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not monitored_accounts:
+        await update.message.reply_text("📭 Monitoring list abhi khaali hai. Use `/add <username>`")
+        return
+    msg = "📋 *Current Monitored Accounts:*\n\n"
+    for i, user in enumerate(monitored_accounts, 1):
+        status = "🟢 Active" if status_tracker.get(user) else "🔴 Banned/Inactive"
+        msg += f"{i}. `@{user}` — {status}\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# 4. /status (Live data aur real-time card details)
+async def check_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not monitored_accounts:
+        await update.message.reply_text("📭 Pehle koi account add karein bhai! Use `/add <username>`")
+        return
+    await update.message.reply_text("🔄 Live status aur profile data fetch ho raha hai...")
+    
+    for username in monitored_accounts:
+        loop = asyncio.get_event_loop()
+        user_data = await loop.run_in_executor(None, fetch_instagram_data, username)
+        
+        if user_data["active"]:
+            status_tracker[username] = True
+            msg = (
+                f"🟢 *@{username} is ACTIVE!*\n\n"
+                f"👤 *Name:* {user_data['name']}\n"
+                f"📝 *Bio:* {user_data['bio']}\n"
+                f"📊 *Posts:* {user_data['posts']} | *Followers:* {user_data['followers']} | *Following:* {user_data['following']}\n\n"
+                f"🔗 [Profile Link](https://instagram.com/{username})"
+            )
+            try:
+                if user_data["pfp"]:
+                    await update.message.reply_photo(photo=user_data["pfp"], caption=msg, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(msg, parse_mode="Markdown")
+            except:
+                await update.message.reply_text(msg, parse_mode="Markdown")
+        else:
+            status_tracker[username] = False
+            await update.message.reply_text(f"🔴 `@{username}` abhi bhi Banned ya Inactive hai.")
+
+# --- ASYNC BACKGROUND MONITORING LOOP ---
+async def background_monitor(app):
     print("Background Monitoring Loop Started...")
-    await bot.wait_until_ready()
-    while not bot.is_closed():
+    while True:
         if monitored_accounts:
-            for username, details in list(monitored_accounts.items()):
-                channel_id, user_mention = details
-                channel = bot.get_channel(channel_id)
-                if not channel: continue
-                    
+            for username in list(monitored_accounts):
                 loop = asyncio.get_event_loop()
                 user_data = await loop.run_in_executor(None, fetch_instagram_data, username)
                 
+                # Unban Hone Par Alert Bhejna (Pehle False tha, ab Active mila)
                 if user_data["active"] and not status_tracker.get(username):
-                    embed = discord.Embed(title="Khof Monitor BOT", color=discord.Color.purple())
-                    embed.description = f"{user_mention} **Aapka Instagram Account Unbanned Ho Gaya Hai!**"
-                    embed.add_field(name="Instagram Account", value=f"@{username}", inline=False)
-                    embed.add_field(name="Followers", value=str(user_data["followers"]), inline=True)
-                    embed.add_field(name="Status", value="✅ Account is Active", inline=False)
-                    if user_data["pfp"]:
-                        embed.set_image(url=user_data["pfp"])
-                    await channel.send(embed=embed)
+                    msg = (
+                        f"✅ *ALERT: Username unbanned!*\n\n"
+                        f"@{username} ab active ho gaya hai!\n\n"
+                        f"👤 *Name:* {user_data['name']}\n"
+                        f"📊 *Stats:*\n"
+                        f"▪️ *Posts:* {user_data['posts']}\n"
+                        f"▪️ *Followers:* {user_data['followers']}\n"
+                        f"▪️ *Following:* {user_data['following']}\n\n"
+                        f"🔗 [View Profile](https://instagram.com/{username})"
+                    )
+                    try:
+                        if user_data["pfp"]:
+                            await app.bot.send_photo(chat_id=CHAT_ID, photo=user_data["pfp"], caption=msg, parse_mode="Markdown")
+                        else:
+                            await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
+                    except:
+                        await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
                     status_tracker[username] = True
-                    del monitored_accounts[username]
+                
                 elif not user_data["active"] and status_tracker.get(username):
                     status_tracker[username] = False
-        await asyncio.sleep(60)
+                    
+        await asyncio.sleep(60)  # Har 1 minute me automatically check karega
 
-if __name__ == "__main__":
+# --- MAIN ASYNC FUNCTION ---
+async def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("add", add_account))
+    app.add_handler(CommandHandler("remove", remove_account))
+    app.add_handler(CommandHandler("list", list_accounts))
+    app.add_handler(CommandHandler("status", check_status))
+
     import threading
     port = int(os.environ.get("PORT", 10000))
     flask_thread = threading.Thread(target=lambda: app_flask.run(host="0.0.0.0", port=port, use_reloader=False))
     flask_thread.daemon = True
     flask_thread.start()
-    bot.run(DISCORD_TOKEN)
+
+    await app.initialize()
+    await app.start()
+    
+    asyncio.create_task(background_monitor(app))
+    
+    print("Telegram Bot & Flask Server are running perfectly via SearchApi...")
+    await app.updater.start_polling()
+    
+    while True:
+        await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.run(main())
