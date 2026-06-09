@@ -3,7 +3,6 @@ import asyncio
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-import instaloader
 
 # --- FLASK WEB SERVER ---
 app_flask = Flask(__name__)
@@ -20,15 +19,6 @@ INSTA_PASS = os.environ.get("INSTA_PASS", "AAPKA_INSTAGRAM_PASSWORD")
 
 monitored_accounts = []  
 status_tracker = {}  
-
-# Instaloader Setup
-L = instaloader.Instaloader()
-try:
-    print("Instagram me login ho raha hai...")
-    L.login(INSTA_USER, INSTA_PASS)
-    print("Instagram Login Successful!")
-except Exception as e:
-    print(f"Instagram Login Failed: {e}")
 
 # --- HELPER FUNCTION FOR SCREENSHOT ---
 def get_screenshot_url(username):
